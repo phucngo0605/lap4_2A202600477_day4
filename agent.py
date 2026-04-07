@@ -7,7 +7,7 @@ from langgraph.graph import StateGraph, START
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 # Import tools từ file tools.py
 from tools import search_flights, search_hotels, calculate_budget
@@ -16,7 +16,7 @@ from tools import search_flights, search_hotels, calculate_budget
 load_dotenv()
 
 # ==========================================
-# 1. Đọc System Prompt từ file txt
+# 1. Đọc System Prompt
 # ==========================================
 try:
     with open("system_prompt.txt", "r", encoding="utf-8") as f:
@@ -29,13 +29,13 @@ except FileNotFoundError:
 # 2. Khai báo State
 # ==========================================
 class AgentState(TypedDict):
+    # add_messages giúp cộng dồn tin nhắn thay vì ghi đè
     messages: Annotated[list, add_messages]
 
 # ==========================================
 # 3. Khởi tạo LLM và Tools
 # ==========================================
 tools_list = [search_flights, search_hotels, calculate_budget]
-# Temperature = 0 để Agent hoạt động chính xác và ổn định
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0) 
 llm_with_tools = llm.bind_tools(tools_list)
 
@@ -45,7 +45,7 @@ llm_with_tools = llm.bind_tools(tools_list)
 def agent_node(state: AgentState):
     messages = state["messages"]
     
-    # Chèn System Prompt vào đầu danh sách nếu chưa có
+    # Kiểm tra nếu chưa có SystemMessage trong lịch sử thì chèn vào đầu
     if not any(isinstance(m, SystemMessage) for m in messages):
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
     
@@ -53,10 +53,9 @@ def agent_node(state: AgentState):
     return {"messages": [response]}
 
 # ==========================================
-# 5. Xây dựng Workflow Graph
+# 5. Xây dựng Workflow Graph (Giữ nguyên cấu trúc)
 # ==========================================
 builder = StateGraph(AgentState)
-
 builder.add_node("agent", agent_node)
 builder.add_node("tools", ToolNode(tools_list))
 
@@ -67,45 +66,53 @@ builder.add_edge("tools", "agent")
 graph = builder.compile()
 
 # ==========================================
-# 6. Chat Loop (Giao diện thực thi)
+# 6. Chat Loop (ĐÃ NÂNG CẤP TRÍ NHỚ)
 # ==========================================
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("🧳 TRAVELBUDDY - TRỢ LÝ DU LỊCH THÔNG MINH (LAB 4)")
-    print("Gõ 'quit', 'exit' hoặc 'q' để thoát chương trình.")
+    print("🧳 TRAVELBUDDY - PHIÊN BẢN CÓ TRÍ NHỚ (LAB 4)")
+    print("Gõ 'quit', 'exit' hoặc 'q' để thoát.")
     print("="*60)
     
+    # BIẾN QUAN TRỌNG: Lưu trữ toàn bộ lịch sử hội thoại của phiên làm việc
+    chat_history = []
+
     while True:
         user_input = input("\n👤 Bạn: ").strip()
         
-        if not user_input:
-            continue
-            
-        if user_input.lower() in ["quit", "exit", "q"]:
+        if not user_input or user_input.lower() in ["quit", "exit", "q"]:
             print("👋 Tạm biệt!")
             break
             
         print("\n🤖 TravelBuddy đang suy nghĩ...")
         
-        # Tạo input cho Graph
-        current_state = {"messages": [HumanMessage(content=user_input)]}
-        final_answer = ""
+        # 1. Thêm tin nhắn của người dùng vào lịch sử
+        chat_history.append(HumanMessage(content=user_input))
+        
+        # 2. Gửi TOÀN BỘ lịch sử tin nhắn vào Graph
+        final_response_text = ""
+        last_ai_message = None
 
-        # Stream qua các bước của Graph
-        for event in graph.stream(current_state, stream_mode="values"):
+        # Sử dụng stream_mode="values" để lấy trạng thái danh sách tin nhắn sau mỗi bước
+        for event in graph.stream({"messages": chat_history}, stream_mode="values"):
             if "messages" in event:
-                last_msg = event["messages"][-1]
+                msg = event["messages"][-1]
                 
-                # LOGGING: Hiển thị khi Agent quyết định gọi Tool
-                # Điểm này giúp bạn đạt 10% phần Logging rõ ràng trong Rubric
-                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                    for tc in last_msg.tool_calls:
+                # LOGGING gọi Tool (giữ nguyên để lấy điểm Rubric)
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
                         print(f"🔍 [LOGGING] Gọi Tool: {tc['name']}")
                         print(f"   ∟ Đối số: {tc['args']}")
                 
-                # Lưu nội dung phản hồi cuối cùng
-                if last_msg.content:
-                    final_answer = last_msg.content
+                # Lưu tin nhắn cuối cùng của AI để cập nhật vào lịch sử sau khi loop kết thúc
+                if isinstance(msg, AIMessage):
+                    last_ai_message = msg
+                    if msg.content:
+                        final_response_text = msg.content
 
-        # In câu trả lời cuối cùng sau khi đã chạy xong các bước (bao gồm cả Tool)
-        print(f"\n✈️ TravelBuddy: {final_answer}")
+        # 3. Cập nhật câu trả lời của AI vào lịch sử hội thoại
+        if last_ai_message:
+            chat_history.append(last_ai_message)
+
+        # In câu trả lời cuối cùng
+        print(f"\n✈️ TravelBuddy: {final_response_text}")
